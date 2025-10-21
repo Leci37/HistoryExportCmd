@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Data.Odbc;
 using System.Data.SqlClient;
 using System.Text;
+using Serilog;
 
 namespace HistoryExportCmd
 {
@@ -10,13 +11,13 @@ namespace HistoryExportCmd
 	internal class DBAccess
 	{
 		// Token: 0x06000001 RID: 1 RVA: 0x00002050 File Offset: 0x00000250
-		public DBAccess(LogFile logFile, string cnEbiSql, string cnEbiOdbc, string cnPointsHistory)
-		{
-			this.mCnEbiSql = cnEbiSql;
-			this.mCnEbiOdbc = cnEbiOdbc;
-			this.mCnPHistory = cnPointsHistory;
-			this.mLogFile = logFile;
-		}
+                public DBAccess(Serilog.ILogger logger, string cnEbiSql, string cnEbiOdbc, string cnPointsHistory)
+                {
+                        this.mCnEbiSql = cnEbiSql;
+                        this.mCnEbiOdbc = cnEbiOdbc;
+                        this.mCnPHistory = cnPointsHistory;
+                        this._log = logger.ForContext(this.GetType());
+                }
 
 		// Token: 0x06000002 RID: 2 RVA: 0x00002078 File Offset: 0x00000278
 		public bool Calculate(DateTime iniTimestamp, DateTime endTimestamp)
@@ -39,11 +40,11 @@ namespace HistoryExportCmd
 					res = true;
 				}
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Error calculating history between {Start} and {End}", iniTimestamp, endTimestamp);
+                        }
 			return res;
 		}
 
@@ -81,15 +82,15 @@ namespace HistoryExportCmd
 								}
 							}
 						}
-						if (this.mFnType == 0)
-						{
-							this.mLogFile.Write(LogFlags.TzERROR, "Couldn't find the method to determine the primary EBI");
-						}
+                                                if (this.mFnType == 0)
+                                                {
+                                                        this._log.Error("Couldn't find the method to determine the primary EBI");
+                                                }
 						if (this.mFnType == 1)
 						{
 							string SQL = "EXEC hwsystem.dbo.hsc_sp_IsPrimary";
 							cmd.CommandText = SQL;
-							this.mLogFile.Write(LogFlags.TzSQL, cmd);
+                                                        this._log.Debug("Executing SQL: {SQL}", cmd.CommandText);
 							using (SqlDataReader dr3 = cmd.ExecuteReader())
 							{
 								if (dr3.Read())
@@ -102,7 +103,7 @@ namespace HistoryExportCmd
 						{
 							string SQL2 = "SELECT hwsystem.dbo.hsc_mfn_IsPrimary()";
 							cmd.CommandText = SQL2;
-							this.mLogFile.Write(LogFlags.TzSQL, cmd);
+                                                        this._log.Debug("Executing SQL: {SQL}", cmd.CommandText);
 							using (SqlDataReader dr4 = cmd.ExecuteReader())
 							{
 								if (dr4.Read())
@@ -115,11 +116,11 @@ namespace HistoryExportCmd
 					res = true;
 				}
 			}
-			catch (Exception ex)
-			{
-				this.mLogFile.Write(LogFlags.TzEXCEPTION, ex.ToString());
-				res = false;
-			}
+                        catch (Exception ex)
+                        {
+                                this._log.Error(ex, "Failed to get EBI status");
+                                res = false;
+                        }
 			return res;
 		}
 
@@ -158,11 +159,11 @@ namespace HistoryExportCmd
 					}
 				}
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to get last datetime for history type {HistoryType}", HistoryType);
+                        }
 			return res;
 		}
 
@@ -191,11 +192,11 @@ namespace HistoryExportCmd
 					}
 				}
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to get parameter {ParameterName}", name);
+                        }
 			return res;
 		}
 
@@ -213,7 +214,7 @@ namespace HistoryExportCmd
 					{
 						string SQL = "SELECT PointId, PointName, ParamName, HistoryFast, HistorySlow, HistoryExtd, HistoryFastArch, HistorySlowArch, HistoryExtdArch FROM Point WHERE ((HistoryFast = 1) AND (HistoryFastArch = 1)) OR ((HistorySlow = 1) AND (HistorySlowArch = 1)) OR ((HistoryExtd = 1) AND (HistoryExtdArch = 1))";
 						cmd.CommandText = SQL;
-						this.mLogFile.Write(LogFlags.TzSQL, SQL);
+                                                this._log.Debug("Executing SQL: {SQL}", SQL);
 						using (SqlDataReader dr = cmd.ExecuteReader())
 						{
 							points = new List<Point>();
@@ -236,11 +237,11 @@ namespace HistoryExportCmd
 					}
 				}
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to get points");
+                        }
 			return res;
 		}
 
@@ -274,7 +275,7 @@ namespace HistoryExportCmd
 				text.Append(points[idx].PointName + "." + points[idx].ParamName);
 			}
 			Console.WriteLine(text.ToString());
-			this.mLogFile.Write(LogFlags.TzINFORMATION, text.ToString());
+                        this._log.Information(text.ToString());
 			try
 			{
 				using (OdbcConnection con = new OdbcConnection(this.mCnEbiOdbc))
@@ -302,7 +303,7 @@ namespace HistoryExportCmd
 						{
 							SQL.Append(string.Format("AND Parameter{0:00#} = '{1}.{2}' ", idx3 + 1, points[idx3].PointName, points[idx3].ParamName));
 						}
-						this.mLogFile.Write(LogFlags.TzSQL, SQL.ToString());
+                                                this._log.Debug("Executing SQL: {SQL}", SQL.ToString());
 						cmd.CommandText = SQL.ToString();
 						cmd.Parameters.AddWithValue("FROM", iniTimestamp);
 						cmd.Parameters.AddWithValue("TO", endTimestamp);
@@ -337,31 +338,22 @@ namespace HistoryExportCmd
 									}
 									else
 									{
-										this.mLogFile.Write(LogFlags.TzDEBUG, "Point Quality is not GOOD: {0}.{1} {2} {3}", new object[]
-										{
-											PointParam[0],
-											PointParam[1],
-											quality,
-											usttimestamp
-										});
+                                                                        this._log.Debug("Point Quality is not GOOD: {Point}.{Param} {Quality} {Timestamp}", PointParam[0], PointParam[1], quality, usttimestamp);
 									}
 								}
 							}
 							Console.WriteLine("{0} records retrieved", lhistory.Count);
-							this.mLogFile.Write(LogFlags.TzINFORMATION, "{0} records retrieved", new object[]
-							{
-								lhistory.Count
-							});
+                                                        this._log.Information("{RecordCount} records retrieved", lhistory.Count);
 							res = true;
 						}
 					}
 				}
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to get history for type {HistoryType}", HistoryType);
+                        }
 			return res;
 		}
 
@@ -381,16 +373,16 @@ namespace HistoryExportCmd
 				{
 					string SQL = "CREATE TABLE #History (PointId int NOT NULL, USTTimestamp datetime NOT NULL, Timestamp datetime NULL, Value float NULL)";
 					cmd.CommandText = SQL;
-					this.mLogFile.Write(LogFlags.TzSQL, SQL);
+                                        this._log.Debug("Executing SQL: {SQL}", SQL);
 					cmd.ExecuteNonQuery();
 					res = true;
 				}
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to prepare history staging table");
+                        }
 			return res;
 		}
 
@@ -399,17 +391,14 @@ namespace HistoryExportCmd
 		{
 			bool res = false;
 			Console.WriteLine("Store {0} records", lhistory.Count);
-			this.mLogFile.Write(LogFlags.TzINFORMATION, "Store {0} records", new object[]
-			{
-				lhistory.Count
-			});
+                        this._log.Information("Store {RecordCount} records", lhistory.Count);
 			try
 			{
 				using (SqlCommand cmd = this.mConn.CreateCommand())
 				{
 					string SQL = "INSERT INTO #History (PointId, USTTimestamp, Timestamp, Value) VALUES (@PointId, @USTTimestamp, @Timestamp, @Value)";
 					cmd.CommandText = SQL;
-					this.mLogFile.Write(LogFlags.TzSQL, SQL);
+                                        this._log.Debug("Executing SQL: {SQL}", SQL);
 					foreach (History history in lhistory)
 					{
 						try
@@ -421,19 +410,19 @@ namespace HistoryExportCmd
 							cmd.Parameters.AddWithValue("@Value", history.Value);
 							cmd.ExecuteNonQuery();
 						}
-						catch (Exception ex)
-						{
-							this.mLogFile.Write(ex);
-						}
+                                                catch (Exception ex)
+                                                {
+                                                        this._log.Error(ex, "Failed to insert history record for point {PointId} at {Timestamp}", history.PointId, history.USTTimestamp);
+                                                }
 					}
 				}
 				res = true;
 			}
-			catch (Exception ex2)
-			{
-				Console.WriteLine(ex2.Message);
-				this.mLogFile.Write(ex2);
-			}
+                        catch (Exception ex2)
+                        {
+                                Console.WriteLine(ex2.Message);
+                                this._log.Error(ex2, "Failed to store history records");
+                        }
 			return res;
 		}
 
@@ -455,10 +444,7 @@ namespace HistoryExportCmd
 				table = "History_1hour";
 			}
 			Console.WriteLine("Move records to {0}", table);
-			this.mLogFile.Write(LogFlags.TzINFORMATION, "Move records to {0}", new object[]
-			{
-				table
-			});
+                        this._log.Information("Move records to {Table}", table);
 			try
 			{
 				using (SqlCommand cmd = this.mConn.CreateCommand())
@@ -466,18 +452,18 @@ namespace HistoryExportCmd
 					string SQL = "INSERT INTO " + table + " (PointId, USTTimestamp, Timestamp, Value) SELECT PointId, USTTimestamp, Timestamp, Value FROM #History";
 					cmd.CommandText = SQL;
 					cmd.CommandTimeout = 600;
-					this.mLogFile.Write(LogFlags.TzSQL, SQL);
+                                        this._log.Debug("Executing SQL: {SQL}", SQL);
 					cmd.ExecuteNonQuery();
 				}
 				this.mConn.Dispose();
 				this.mConn = null;
 				res = true;
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to finish processing for {Table}", table);
+                        }
 			return res;
 		}
 
@@ -494,7 +480,7 @@ namespace HistoryExportCmd
 		private int mFnType;
 
 		// Token: 0x04000005 RID: 5
-		private LogFile mLogFile;
+                private readonly Serilog.ILogger _log;
 
 		// Token: 0x04000006 RID: 6
 		private SqlConnection mConn;

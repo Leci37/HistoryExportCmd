@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Data;
 using System.Data.SqlClient;
+using Serilog;
 
 namespace HistoryExportCmd
 {
@@ -8,11 +9,11 @@ namespace HistoryExportCmd
 	internal class DBSync
 	{
 		// Token: 0x06000011 RID: 17 RVA: 0x0000309C File Offset: 0x0000129C
-		public DBSync(LogFile logFile, string cnPointsHistory)
-		{
-			this.mCnPHistory = cnPointsHistory;
-			this.mLogFile = logFile;
-		}
+                public DBSync(Serilog.ILogger logger, string cnPointsHistory)
+                {
+                        this.mCnPHistory = cnPointsHistory;
+                        this._log = logger.ForContext(this.GetType());
+                }
 
 		// Token: 0x06000012 RID: 18 RVA: 0x000030B4 File Offset: 0x000012B4
 		public bool SyncPoint(string pServer, string bServer)
@@ -20,38 +21,32 @@ namespace HistoryExportCmd
 			bool res = false;
 			try
 			{
-				this.mLogFile.Write(LogFlags.TzINFORMATION, "Synchronizing Point table");
+                                this._log.Information("Synchronizing Point table");
 				using (SqlConnection con = new SqlConnection(this.mCnPHistory))
 				{
 					con.Open();
 					using (SqlCommand cmd = con.CreateCommand())
 					{
 						cmd.CommandText = string.Format("insert into {1}.PointsHistory.dbo.Point select P.* from {0}.PointsHistory.dbo.Point P left join {1}.PointsHistory.dbo.Point B on P.PointId = B.PointId where b.PointId is null", pServer, bServer);
-						this.mLogFile.Write(LogFlags.TzSQL, cmd);
+                                                this._log.Debug("Executing SQL: {SQL}", cmd.CommandText);
 						int affected = cmd.ExecuteNonQuery();
-						this.mLogFile.Write(LogFlags.TzINFORMATION, "{0} records inserted in backup server", new object[]
-						{
-							affected
-						});
+                                                this._log.Information("{RecordCount} records inserted in backup server", affected);
 					}
 					using (SqlCommand cmd2 = con.CreateCommand())
 					{
 						cmd2.CommandText = string.Format("update B set B.PointName = P.PointName, B.ParamName = P.ParamName, B.Description = P.Description, B.Device = P.Device, B.HistoryFast = P.HistoryFast, B.HistorySlow = P.HistorySlow, B.HistoryExtd = P.HistoryExtd, B.HistoryFastArch = P.HistoryFastArch, B.HistorySlowArch = P.HistorySlowArch, B.HistoryExtdArch = P.HistoryExtdArch from {0}.PointsHistory.dbo.Point P join {1}.PointsHistory.dbo.Point B on P.PointId = B.PointId", pServer, bServer);
-						this.mLogFile.Write(LogFlags.TzSQL, cmd2);
+                                                this._log.Debug("Executing SQL: {SQL}", cmd2.CommandText);
 						int affected2 = cmd2.ExecuteNonQuery();
-						this.mLogFile.Write(LogFlags.TzINFORMATION, "{0} records updated in backup server", new object[]
-						{
-							affected2
-						});
+                                                this._log.Information("{RecordCount} records updated in backup server", affected2);
 					}
 				}
 				res = true;
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to synchronize Point table");
+                        }
 			return res;
 		}
 
@@ -76,10 +71,7 @@ namespace HistoryExportCmd
 			DateTime maxDatetime = new DateTime(2000, 1, 1);
 			try
 			{
-				this.mLogFile.Write(LogFlags.TzINFORMATION, "Synchronizing {0} table", new object[]
-				{
-					table
-				});
+                                this._log.Information("Synchronizing {Table} table", table);
 				using (SqlConnection con = new SqlConnection(this.mCnPHistory))
 				{
 					con.Open();
@@ -110,23 +102,20 @@ namespace HistoryExportCmd
 							DateTime auxDatetime = minDatetime.AddHours(1.0);
 							cmd.Parameters["@MinTimestamp"].Value = minDatetime;
 							cmd.Parameters["@MaxTimestamp"].Value = auxDatetime;
-							this.mLogFile.Write(LogFlags.TzSQL, cmd);
+                                                        this._log.Debug("Executing SQL: {SQL}", cmd.CommandText);
 							int affected = cmd.ExecuteNonQuery();
-							this.mLogFile.Write(LogFlags.TzINFORMATION, "{0} records inserted in backup server", new object[]
-							{
-								affected
-							});
+                                                        this._log.Information("{RecordCount} records inserted in backup server", affected);
 							minDatetime = auxDatetime;
 						}
 					}
 				}
 				res = true;
 			}
-			catch (Exception ex)
-			{
-				Console.WriteLine(ex.Message);
-				this.mLogFile.Write(ex);
-			}
+                        catch (Exception ex)
+                        {
+                                Console.WriteLine(ex.Message);
+                                this._log.Error(ex, "Failed to synchronize history table {Table}", table);
+                        }
 			return res;
 		}
 
@@ -134,6 +123,6 @@ namespace HistoryExportCmd
 		private string mCnPHistory;
 
 		// Token: 0x04000008 RID: 8
-		private LogFile mLogFile;
+                private readonly Serilog.ILogger _log;
 	}
 }
