@@ -1,42 +1,43 @@
 # HistoryExportCmd
 
-`HistoryExportCmd` is a .NET 4.0 console application designed to export historical data from an EBI system into a dedicated SQL Server database (`PointsHistory`). It includes logic for running in a redundant server environment.
+Project recovery of a legacy .NET app from a compiled .exe, as the original source code is lost. The goal is to decompile, stabilize (fix DB errors), refactor the C# code, add modern logging and documentation, and implement new features to restore and improve the application.
 
-**Project Status:** This is a project recovery from a decompiled .NET executable. The original source code was lost. The code has been stabilized but was not originally authored for this repository.
+## Configuration
 
-## Architecture & Core Functionality
+Application settings now live in `appsettings.json`, with optional overrides in `appsettings.{Environment}.json`. The runtime environment is controlled through the `DOTNET_ENVIRONMENT` variable. The most common values are `Production` (default) and `Development`.
 
-The application operates in one of two modes, determined at startup:
+| Section | Setting | Description |
+| --- | --- | --- |
+| `Logging` | `Path` | Directory used for Serilog rolling log files. |
+|  | `RetentionDays` | Number of log files to keep before they are removed. |
+| `Processing` | `OldestDayFromToday` | Maximum age (in days) of history to process. |
+|  | `PointBatchSize` | Number of points processed per batch when exporting history. |
+| `Redundancy` | `Enabled` | Enables synchronization from the redundant server when `true`. |
+| `ConnectionStrings` | `PointsHistory` | SQL Server connection string for the PointsHistory database. |
+|  | `EBI_ODBC` | ODBC connection string for the EBI history snapshots. |
+|  | `EBI_SQL` | SQL Server connection string used to query the EBI status. |
 
-1.  **Primary Mode:** If the application detects it is running on the primary EBI server (by successfully calling `hwsystem.dbo.hsc_sp_IsPrimary` or `hsc_mfn_IsPrimary`), it will:
-    * Read point configurations from the local `PointsHistory` database (`Point` table).
-    * Connect to the EBI history database via **ODBC** (`EBI_ODBC`).
-    * Fetch data from `History5SecondSnapshot`, `History1MinSnapshot`, and `History1HourSnapshot` tables based on the last recorded timestamp.
-    * Insert this data into the corresponding `History_5sec`, `History_1min`, and `History_1hour` tables in the `PointsHistory` SQL database.
-    * Run an aggregation step to populate `History_15min` from `History_1min`.
+Create an `appsettings.Development.json` (one is provided as an example) to store machine-specific overrides without modifying the default settings.
 
-2.  **Secondary (Sync) Mode:** If the EBI server is not primary and `RedundantPointHistory` is enabled in `app.config`, it will:
-    * Assume a paired server (e.g., "SERVERA" and "SERVERB").
-    * Connect to the *primary* server's `PointsHistory` database (likely via a linked server).
-    * Synchronize the `Point` table and all `History_*` tables by pulling missing records from the primary to the local secondary database.
+## How to Run
 
-## Configuration (app.config)
+1. Restore NuGet packages and build the solution:
+   ```bash
+   dotnet restore
+   dotnet build
+   ```
+2. Configure the desired environment variables (e.g., `DOTNET_ENVIRONMENT=Development`).
+3. Update the connection strings in the appropriate `appsettings*.json` files.
+4. Execute the command-line application:
+   ```bash
+   dotnet run --project HistoryExportCmd/HistoryExportCmd.csproj
+   ```
 
-All configuration is managed in `app.config`.
+## Architecture Overview
 
-### Connection Strings
-* `PointsHistory`: SQL Server connection string for the local database where history is stored.
-* `EBI_ODBC`: The ODBC Data Source Name (DSN) for connecting to the EBI history snapshot tables.
-* `EBI_SQL`: SQL Server connection string to the local EBI `master` database, used *only* to check for primary server status.
+The export process has two operating modes:
 
-### App Settings
-* `OldestDayFromToday`: The maximum number of days in the past to query for history if the local database is empty (e.g., `1295` days).
-* `RedundantPointHistory`: `true`/`false`. Enables or disables the Secondary (Sync) Mode.
-* `LogPath`: Directory to store log files (e.g., `Logs`).
+- **Primary mode** – When the current server is detected as the primary EBI instance, the application reads configured points, retrieves historical snapshots for each history cadence (fast, slow, extended), and persists the data into the PointsHistory database in batches.
+- **Secondary mode** – When the server is not primary and redundancy is enabled, the application synchronizes point metadata and history tables from the opposing server (suffix `A`/`B`) to keep the backup environment aligned with the primary.
 
-## Key Classes
-* `Program.cs`: Main entry point. Contains the high-level Primary/Secondary logic.
-* `DBAccess.cs`: Handles all database operations for **Primary Mode** (reading from EBI ODBC, writing to `PointsHistory` SQL).
-* `DBSync.cs`: Handles all database operations for **Secondary Mode** (syncing `PointsHistory` from the primary server).
-* `LogFile.cs`: A simple custom file logger.
-* `Point.cs` / `History.cs`: Data models for point configuration and history records.
+History cadence handling is now expressed through the `HistoryType` enum, making the code paths for fast (5 seconds), slow (1 minute), and extended (1 hour) histories explicit and type-safe.
