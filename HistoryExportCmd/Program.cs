@@ -1,37 +1,26 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Collections.Specialized;
-using System.Configuration;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using Serilog;
 
 namespace HistoryExportCmd
 {
-	// Token: 0x02000007 RID: 7
-	internal class Program : IDisposable
-	{
-		// Token: 0x06000020 RID: 32 RVA: 0x00003A70 File Offset: 0x00001C70
-		private static int Main(string[] args)
-		{
-			int ret = 0;
-			using (Program program = new Program())
-			{
-				ret = program.DoWork();
-			}
-			return ret;
-		}
+        internal class Program : IDisposable
+        {
+                private Program(IConfiguration configuration)
+                {
+                        string baseDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
+                        Directory.SetCurrentDirectory(baseDirectory);
 
-		// Token: 0x06000021 RID: 33 RVA: 0x00003AAC File Offset: 0x00001CAC
-		private Program()
-		{
-			Directory.SetCurrentDirectory(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
-			NameValueCollection config = ConfigurationManager.AppSettings;
-                        string logPath = config["LogPath"] ?? "Logs";
+                        this._configuration = configuration;
+                        string logPath = configuration.GetValue("Logging:Path", "Logs");
                         Directory.CreateDirectory(logPath);
                         string logTemplate = "{Timestamp:G} [{Level:u3}] {Message:lj}{NewLine}{Exception}";
-                        int retainedFiles = Convert.ToInt32(config["LogMaxDays"] ?? "15");
+                        int retainedFiles = Math.Max(1, configuration.GetValue("Logging:RetentionDays", 15));
                         Log.Logger = new LoggerConfiguration()
                                 .MinimumLevel.Debug()
                                 .Enrich.FromLogContext()
@@ -39,180 +28,228 @@ namespace HistoryExportCmd
                                 .CreateLogger();
                         this._log = Log.Logger.ForContext<Program>();
                         this._log.Information("Starting");
+
+                        this._processingSettings = new ProcessingSettings
+                        {
+                                OldestDayFromToday = Math.Max(0, configuration.GetValue("Processing:OldestDayFromToday", 1295)),
+                                PointBatchSize = Math.Max(1, configuration.GetValue("Processing:PointBatchSize", 10))
+                        };
+
+                        this._redundantPointHistory = configuration.GetValue("Redundancy:Enabled", false);
                 }
 
-		// Token: 0x06000022 RID: 34 RVA: 0x00003B25 File Offset: 0x00001D25
-		public void Dispose()
-		{
+                public static async Task<int> Main(string[] args)
+                {
+                        string baseDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
+                        string environment = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT") ?? "Production";
+
+                        IConfigurationRoot configuration = new ConfigurationBuilder()
+                                .SetBasePath(baseDirectory)
+                                .AddJsonFile("appsettings.json", optional: false, reloadOnChange: false)
+                                .AddJsonFile($"appsettings.{environment}.json", optional: true, reloadOnChange: false)
+                                .AddEnvironmentVariables()
+                                .Build();
+
+                        using Program program = new Program(configuration);
+                        return await program.DoWorkAsync().ConfigureAwait(false);
+                }
+
+                public void Dispose()
+                {
                         this._log.Information("Finished");
                         Log.CloseAndFlush();
                 }
 
-		// Token: 0x06000023 RID: 35 RVA: 0x00003B40 File Offset: 0x00001D40
-		private int DoWork()
-		{
-			string cnPHistory = ConfigurationManager.ConnectionStrings["PointsHistory"].ConnectionString;
-			string cnEbiOdbc = ConfigurationManager.ConnectionStrings["EBI_ODBC"].ConnectionString;
-			string cnEbiSql = ConfigurationManager.ConnectionStrings["EBI_SQL"].ConnectionString;
+                private async Task<int> DoWorkAsync()
+                {
+                        string cnPHistory = this._configuration.GetConnectionString("PointsHistory");
+                        string cnEbiOdbc = this._configuration.GetConnectionString("EBI_ODBC");
+                        string cnEbiSql = this._configuration.GetConnectionString("EBI_SQL");
+
+                        if (string.IsNullOrWhiteSpace(cnPHistory) || string.IsNullOrWhiteSpace(cnEbiOdbc) || string.IsNullOrWhiteSpace(cnEbiSql))
+                        {
+                                this._log.Error("One or more connection strings are missing from the configuration.");
+                                return 1;
+                        }
+
                         DBAccess dbaccess = new DBAccess(this._log, cnEbiSql, cnEbiOdbc, cnPHistory);
-			bool primary;
-			bool ebistatus = dbaccess.GetEBIStatus(out primary);
-			if (ebistatus)
-			{
-				if (primary)
-				{
-					this.Process(dbaccess);
-				}
-				else
-				{
-					this.Synchronize();
-				}
-			}
-			else
-			{
+                        var (statusSuccess, primary) = await dbaccess.GetEBIStatusAsync().ConfigureAwait(false);
+
+                        if (!statusSuccess)
+                        {
                                 this._log.Information("Failure reading the EBI status, the process cannot run");
-			}
-			if (!ebistatus)
-			{
-				return 1;
-			}
-			return 0;
-		}
+                                return 1;
+                        }
 
-		// Token: 0x06000024 RID: 36 RVA: 0x00003BD8 File Offset: 0x00001DD8
-		private void Process(DBAccess dbaccess)
-		{
+                        if (primary)
+                        {
+                                await this.ProcessAsync(dbaccess).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                                await this.SynchronizeAsync().ConfigureAwait(false);
+                        }
+
+                        return 0;
+                }
+
+                private async Task ProcessAsync(DBAccess dbaccess)
+                {
                         this._log.Information("Starting the process");
-			DateTime now = DateTime.Now.ToUniversalTime();
-			int oldestDayFromToday = Convert.ToInt32(ConfigurationManager.AppSettings["OldestDayFromToday"]);
-			DateTime oldestDay = now.Date.AddDays((double)(-(double)oldestDayFromToday));
-			List<Point> points;
-			bool res = dbaccess.GetPoints(out points);
-			if (res)
-			{
-                                this._log.Information("{PointCount} points read from database", points.Count);
-				for (int type = 1; type <= 3; type++)
-				{
-                                        this._log.Information("Working on {HistoryType}", (type == 1) ? "Fast History" : ((type == 2) ? "Standard History" : "Extended History"));
-					List<Point> points2 = null;
-					if (type == 1)
-					{
-						points2 = (from p in points
-						where p.HistoryFast && p.HistoryFastArch
-						select p).ToList<Point>();
-					}
-					if (type == 2)
-					{
-						points2 = (from p in points
-						where p.HistorySlow && p.HistorySlowArch
-						select p).ToList<Point>();
-					}
-					if (type == 3)
-					{
-						points2 = (from p in points
-						where p.HistoryExtd && p.HistoryExtdArch
-						select p).ToList<Point>();
-					}
-                                        this._log.Information("{PointCount} points configured for this History type", points2.Count);
-					if (points2.Count > 0)
-					{
-						int interval = 0;
-						if (type == 1)
-						{
-							interval = 5;
-						}
-						if (type == 2)
-						{
-							interval = 60;
-						}
-						if (type == 3)
-						{
-							interval = 3600;
-						}
-						DateTime iniDatetime;
-						res = dbaccess.GetLastDatetime(type, out iniDatetime);
-						if (res)
-						{
-							iniDatetime = ((iniDatetime < oldestDay) ? oldestDay : iniDatetime.AddSeconds(3.0));
-							DateTime limit = now.AddMinutes(-130.0);
-							while (iniDatetime < limit && res)
-							{
-								DateTime endDatetime = iniDatetime.AddSeconds((double)(3200 * interval));
-								if (endDatetime > limit)
-								{
-									endDatetime = limit;
-								}
-                                                                this._log.Information("iniDateTime: {IniDateTime}", iniDatetime);
-                                                                this._log.Information("endDateTime: {EndDateTime}", endDatetime);
-								if (endDatetime - iniDatetime > TimeSpan.FromSeconds((double)interval))
-								{
-									res = dbaccess.Prepare();
-									if (res)
-									{
-										int num = 10;
-										int idx = 0;
-										while (idx < points2.Count && res)
-										{
-											List<Point> points3 = new List<Point>();
-											int idx2 = 0;
-											while (idx2 < num && idx + idx2 < points2.Count)
-											{
-												points3.Add(points2[idx + idx2]);
-												idx2++;
-											}
-											List<History> history;
-											res = dbaccess.GetHistory(type, iniDatetime, endDatetime, points3, out history);
-											if (res)
-											{
-												res = dbaccess.StoreHistory(type, history);
-											}
-											idx += num;
-										}
-										if (res)
-										{
-											res = dbaccess.Finish(type);
-										}
-									}
-								}
-								iniDatetime = endDatetime;
-							}
-						}
-					}
-				}
-			}
-                        this._log.Information("Process finished");
-		}
+                        DateTime now = DateTime.UtcNow;
+                        DateTime oldestDay = now.Date.AddDays(-this._processingSettings.OldestDayFromToday);
 
-		// Token: 0x06000025 RID: 37 RVA: 0x00003F3C File Offset: 0x0000213C
-		private void Synchronize()
-		{
-			if (Convert.ToBoolean(ConfigurationManager.AppSettings["RedundantPointHistory"]))
-			{
-				string bServer = Environment.MachineName;
-				string pServer;
-				if (bServer.EndsWith("A"))
-				{
-					pServer = bServer.Substring(0, bServer.Length - 1) + "B";
-				}
-				else
-				{
-					pServer = bServer.Substring(0, bServer.Length - 1) + "A";
-				}
-                                this._log.Information("Starting the process");
-                                string cnPHistory = ConfigurationManager.ConnectionStrings["PointsHistory"].ConnectionString;
-                                DBSync dbaccess = new DBSync(this._log, cnPHistory);
-				bool res = dbaccess.SyncPoint(pServer, bServer);
-				int historyType = 1;
-				while (historyType <= 3 && res)
-				{
-					res = dbaccess.SyncHistoryTable(pServer, bServer, historyType);
-					historyType++;
-				}
+                        var (pointsSuccess, points) = await dbaccess.GetPointsAsync().ConfigureAwait(false);
+                        if (!pointsSuccess)
+                        {
                                 this._log.Information("Process finished");
-			}
-		}
+                                return;
+                        }
 
-		// Token: 0x04000018 RID: 24
+                        this._log.Information("{PointCount} points read from database", points.Count);
+
+                        foreach (HistoryType historyType in new[] { HistoryType.Fast, HistoryType.Slow, HistoryType.Extended })
+                        {
+                                this._log.Information("Working on {HistoryType}", historyType.GetDisplayName());
+                                List<Point> filteredPoints = FilterPoints(points, historyType);
+                                this._log.Information("{PointCount} points configured for this History type", filteredPoints.Count);
+                                if (filteredPoints.Count == 0)
+                                {
+                                        continue;
+                                }
+
+                                var (lastSuccess, lastDatetime) = await dbaccess.GetLastDatetimeAsync(historyType).ConfigureAwait(false);
+                                if (!lastSuccess)
+                                {
+                                        continue;
+                                }
+
+                                DateTime iniDatetime = lastDatetime ?? oldestDay;
+                                if (iniDatetime < oldestDay)
+                                {
+                                        iniDatetime = oldestDay;
+                                }
+                                else
+                                {
+                                        iniDatetime = iniDatetime.AddSeconds(3);
+                                }
+
+                                DateTime limit = now.AddMinutes(-130.0);
+                                bool res = true;
+                                while (iniDatetime < limit && res)
+                                {
+                                        DateTime endDatetime = iniDatetime.AddSeconds(3200 * historyType.GetIntervalSeconds());
+                                        if (endDatetime > limit)
+                                        {
+                                                endDatetime = limit;
+                                        }
+
+                                        if (endDatetime - iniDatetime > TimeSpan.FromSeconds(historyType.GetIntervalSeconds()))
+                                        {
+                                                res = await dbaccess.PrepareAsync().ConfigureAwait(false);
+                                                if (res)
+                                                {
+                                                        int index = 0;
+                                                        while (index < filteredPoints.Count && res)
+                                                        {
+                                                                int count = Math.Min(this._processingSettings.PointBatchSize, filteredPoints.Count - index);
+                                                                List<Point> batch = filteredPoints.GetRange(index, count);
+                                                                var (historySuccess, history) = await dbaccess.GetHistoryAsync(historyType, iniDatetime, endDatetime, batch).ConfigureAwait(false);
+                                                                if (historySuccess)
+                                                                {
+                                                                        res = await dbaccess.StoreHistoryAsync(historyType, history).ConfigureAwait(false);
+                                                                }
+                                                                else
+                                                                {
+                                                                        res = false;
+                                                                }
+                                                                index += count;
+                                                        }
+                                                        if (res)
+                                                        {
+                                                                res = await dbaccess.FinishAsync(historyType).ConfigureAwait(false);
+                                                        }
+                                                        else
+                                                        {
+                                                                dbaccess.Reset();
+                                                        }
+                                                }
+                                        }
+
+                                        iniDatetime = endDatetime;
+                                }
+                        }
+
+                        this._log.Information("Process finished");
+                }
+
+                private async Task SynchronizeAsync()
+                {
+                        if (!this._redundantPointHistory)
+                        {
+                                return;
+                        }
+
+                        string backupServer = Environment.MachineName;
+                        string primaryServer;
+                        if (backupServer.EndsWith("A", StringComparison.OrdinalIgnoreCase))
+                        {
+                                primaryServer = backupServer.Substring(0, backupServer.Length - 1) + "B";
+                        }
+                        else
+                        {
+                                primaryServer = backupServer.Substring(0, backupServer.Length - 1) + "A";
+                        }
+
+                        string cnPHistory = this._configuration.GetConnectionString("PointsHistory");
+                        if (string.IsNullOrWhiteSpace(cnPHistory))
+                        {
+                                this._log.Error("PointsHistory connection string is missing; synchronization cannot continue.");
+                                return;
+                        }
+
+                        this._log.Information("Starting the process");
+                        DBSync dbaccess = new DBSync(this._log, cnPHistory);
+                        bool res = await dbaccess.SyncPointAsync(primaryServer, backupServer).ConfigureAwait(false);
+                        foreach (HistoryType historyType in new[] { HistoryType.Fast, HistoryType.Slow, HistoryType.Extended })
+                        {
+                                if (!res)
+                                {
+                                        break;
+                                }
+                                res = await dbaccess.SyncHistoryTableAsync(primaryServer, backupServer, historyType).ConfigureAwait(false);
+                        }
+                        this._log.Information("Process finished");
+                }
+
+                private static List<Point> FilterPoints(IReadOnlyList<Point> points, HistoryType historyType)
+                {
+                        switch (historyType)
+                        {
+                                case HistoryType.Fast:
+                                        return points.Where(p => p.HistoryFast && p.HistoryFastArch).ToList();
+                                case HistoryType.Slow:
+                                        return points.Where(p => p.HistorySlow && p.HistorySlowArch).ToList();
+                                case HistoryType.Extended:
+                                        return points.Where(p => p.HistoryExtd && p.HistoryExtdArch).ToList();
+                                default:
+                                        throw new ArgumentOutOfRangeException(nameof(historyType), historyType, null);
+                        }
+                }
+
+                private readonly IConfiguration _configuration;
+
+                private readonly ProcessingSettings _processingSettings;
+
+                private readonly bool _redundantPointHistory;
+
                 private readonly Serilog.ILogger _log;
-	}
+
+                private sealed class ProcessingSettings
+                {
+                        public int OldestDayFromToday { get; init; }
+
+                        public int PointBatchSize { get; init; }
+                }
+        }
 }
