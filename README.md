@@ -1,43 +1,42 @@
-
 # HistoryExportCmd
 
-`HistoryExportCmd` es una aplicación de consola .NET 4.0 diseñada para exportar datos históricos de un sistema EBI a una base de datos SQL Server dedicada (`PointsHistory`). Incluye lógica para operar en un entorno de servidores redundantes.
+`HistoryExportCmd` is a .NET 4.0 console application designed to export historical data from an EBI system into a dedicated SQL Server database (`PointsHistory`). It includes logic for running in a redundant server environment.
 
-**Estado del Proyecto:** Esta es la recuperación de un proyecto a partir de un ejecutable .NET decompilado. El código fuente original se perdió. El código ha sido estabilizado, pero no fue escrito originalmente para este repositorio.
+**Project Status:** This is a project recovery from a decompiled .NET executable. The original source code was lost. The code has been stabilized but was not originally authored for this repository.
 
-## Arquitectura y Funcionalidad Principal
+## Architecture & Core Functionality
 
-La aplicación opera en uno de dos modos, determinados en el arranque:
+The application operates in one of two modes, determined at startup:
 
-1.  **Modo Primario:** Si la aplicación detecta que se está ejecutando en el servidor EBI primario (llamando con éxito a `hwsystem.dbo.hsc_sp_IsPrimary` o `hsc_mfn_IsPrimary`), procederá a:
-    * Leer las configuraciones de puntos desde la base de datos local `PointsHistory` (tabla `Point`).
-    * Conectarse a la base de datos de históricos de EBI vía **ODBC** (`EBI_ODBC`).
-    * Obtener datos de las tablas `History5SecondSnapshot`, `History1MinSnapshot` y `History1HourSnapshot` basándose en la última marca de tiempo registrada.
-    * Insertar estos datos en las tablas correspondientes `History_5sec`, `History_1min` y `History_1hour` en la base de datos SQL `PointsHistory`.
-    * Ejecutar un paso de agregación para poblar `History_15min` a partir de `History_1min`.
+1.  **Primary Mode:** If the application detects it is running on the primary EBI server (by successfully calling `hwsystem.dbo.hsc_sp_IsPrimary` or `hsc_mfn_IsPrimary`), it will:
+    * Read point configurations from the local `PointsHistory` database (`Point` table).
+    * Connect to the EBI history database via **ODBC** (`EBI_ODBC`).
+    * Fetch data from `History5SecondSnapshot`, `History1MinSnapshot`, and `History1HourSnapshot` tables based on the last recorded timestamp.
+    * Insert this data into the corresponding `History_5sec`, `History_1min`, and `History_1hour` tables in the `PointsHistory` SQL database.
+    * Run an aggregation step to populate `History_15min` from `History_1min`.
 
-2.  **Modo Secundario (Sincronización):** Si el servidor EBI no es primario y `RedundantPointHistory` está habilitado en `app.config`, procederá a:
-    * Asumir un servidor pareado (ej. "SERVERA" y "SERVERB").
-    * Conectarse a la base de datos `PointsHistory` del servidor *primario* (probablemente a través de un servidor vinculado).
-    * Sincronizar la tabla `Point` y todas las tablas `History_*` trayendo los registros faltantes desde el primario a la base de datos secundaria local.
+2.  **Secondary (Sync) Mode:** If the EBI server is not primary and `RedundantPointHistory` is enabled in `app.config`, it will:
+    * Assume a paired server (e.g., "SERVERA" and "SERVERB").
+    * Connect to the *primary* server's `PointsHistory` database (likely via a linked server).
+    * Synchronize the `Point` table and all `History_*` tables by pulling missing records from the primary to the local secondary database.
 
-## Configuración (app.config)
+## Configuration (app.config)
 
-Toda la configuración se gestiona en `app.config`.
+All configuration is managed in `app.config`.
 
-### Cadenas de Conexión
-* `PointsHistory`: Cadena de conexión de SQL Server para la base de datos local donde se almacenan los históricos.
-* `EBI_ODBC`: El Nombre de Origen de Datos (DSN) de ODBC para conectarse a las tablas de snapshots de históricos de EBI.
-* `EBI_SQL`: Cadena de conexión de SQL Server a la base de datos `master` local de EBI, usada *solo* para comprobar el estado del servidor primario.
+### Connection Strings
+* `PointsHistory`: SQL Server connection string for the local database where history is stored.
+* `EBI_ODBC`: The ODBC Data Source Name (DSN) for connecting to the EBI history snapshot tables.
+* `EBI_SQL`: SQL Server connection string to the local EBI `master` database, used *only* to check for primary server status.
 
 ### App Settings
-* `OldestDayFromToday`: El número máximo de días en el pasado para consultar históricos si la base de datos local está vacía (ej. `1295` días).
-* `RedundantPointHistory`: `true`/`false`. Habilita o deshabilita el Modo Secundario (Sincronización).
-* `LogPath`: Directorio para almacenar los archivos de log (ej. `Logs`).
+* `OldestDayFromToday`: The maximum number of days in the past to query for history if the local database is empty (e.g., `1295` days).
+* `RedundantPointHistory`: `true`/`false`. Enables or disables the Secondary (Sync) Mode.
+* `LogPath`: Directory to store log files (e.g., `Logs`).
 
-## Clases Clave
-* `Program.cs`: Punto de entrada principal. Contiene la lógica de alto nivel para el modo Primario/Secundario.
-* `DBAccess.cs`: Gestiona todas las operaciones de base de datos para el **Modo Primario** (leer de EBI ODBC, escribir en `PointsHistory` SQL).
-* `DBSync.cs`: Gestiona todas las operaciones de base de datos para el **Modo Secundario** (sincronizar `PointsHistory` desde el servidor primario).
-* `LogFile.cs`: Un registrador (logger) de archivos personalizado y simple.
-* `Point.cs` / `History.cs`: Modelos de datos para la configuración de puntos y los registros de históricos.
+## Key Classes
+* `Program.cs`: Main entry point. Contains the high-level Primary/Secondary logic.
+* `DBAccess.cs`: Handles all database operations for **Primary Mode** (reading from EBI ODBC, writing to `PointsHistory` SQL).
+* `DBSync.cs`: Handles all database operations for **Secondary Mode** (syncing `PointsHistory` from the primary server).
+* `LogFile.cs`: A simple custom file logger.
+* `Point.cs` / `History.cs`: Data models for point configuration and history records.
