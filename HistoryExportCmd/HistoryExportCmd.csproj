@@ -45,8 +45,6 @@
     <Compile Include="DBAccess.cs" />
     <Compile Include="DBSync.cs" />
     <Compile Include="History.cs" />
-    <Compile Include="LogFile.cs" />
-    <Compile Include="LogFlags.cs" />
     <Compile Include="Point.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />

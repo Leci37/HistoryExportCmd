@@ -5,6 +5,7 @@ using System.Configuration;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using Serilog;
 
 namespace HistoryExportCmd
 {
@@ -27,21 +28,25 @@ namespace HistoryExportCmd
 		{
 			Directory.SetCurrentDirectory(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location));
 			NameValueCollection config = ConfigurationManager.AppSettings;
-			string logPath = config["LogPath"];
-			if (logPath != null)
-			{
-				Directory.CreateDirectory(logPath);
-			}
-			LogFile.SetConfig(typeof(LogFlags), config);
-			this.mLogfile = new LogFile("HistoryExportCmd_#.log");
-			this.mLogfile.Write(LogFlags.TzINFORMATION, "Starting");
-		}
+                        string logPath = config["LogPath"] ?? "Logs";
+                        Directory.CreateDirectory(logPath);
+                        string logTemplate = "{Timestamp:G} [{Level:u3}] {Message:lj}{NewLine}{Exception}";
+                        int retainedFiles = Convert.ToInt32(config["LogMaxDays"] ?? "15");
+                        Log.Logger = new LoggerConfiguration()
+                                .MinimumLevel.Debug()
+                                .Enrich.FromLogContext()
+                                .WriteTo.File(Path.Combine(logPath, "HistoryExportCmd_#.log"), outputTemplate: logTemplate, rollingInterval: RollingInterval.Day, retainedFileCountLimit: retainedFiles)
+                                .CreateLogger();
+                        this._log = Log.Logger.ForContext<Program>();
+                        this._log.Information("Starting");
+                }
 
 		// Token: 0x06000022 RID: 34 RVA: 0x00003B25 File Offset: 0x00001D25
 		public void Dispose()
 		{
-			this.mLogfile.Write(LogFlags.TzINFORMATION, "Finished\n\n");
-		}
+                        this._log.Information("Finished");
+                        Log.CloseAndFlush();
+                }
 
 		// Token: 0x06000023 RID: 35 RVA: 0x00003B40 File Offset: 0x00001D40
 		private int DoWork()
@@ -49,7 +54,7 @@ namespace HistoryExportCmd
 			string cnPHistory = ConfigurationManager.ConnectionStrings["PointsHistory"].ConnectionString;
 			string cnEbiOdbc = ConfigurationManager.ConnectionStrings["EBI_ODBC"].ConnectionString;
 			string cnEbiSql = ConfigurationManager.ConnectionStrings["EBI_SQL"].ConnectionString;
-			DBAccess dbaccess = new DBAccess(this.mLogfile, cnEbiSql, cnEbiOdbc, cnPHistory);
+                        DBAccess dbaccess = new DBAccess(this._log, cnEbiSql, cnEbiOdbc, cnPHistory);
 			bool primary;
 			bool ebistatus = dbaccess.GetEBIStatus(out primary);
 			if (ebistatus)
@@ -65,7 +70,7 @@ namespace HistoryExportCmd
 			}
 			else
 			{
-				this.mLogfile.Write(LogFlags.TzINFORMATION, "Failure reading the EBI status, the process cannot run");
+                                this._log.Information("Failure reading the EBI status, the process cannot run");
 			}
 			if (!ebistatus)
 			{
@@ -77,7 +82,7 @@ namespace HistoryExportCmd
 		// Token: 0x06000024 RID: 36 RVA: 0x00003BD8 File Offset: 0x00001DD8
 		private void Process(DBAccess dbaccess)
 		{
-			this.mLogfile.Write(LogFlags.TzINFORMATION, "Starting the process");
+                        this._log.Information("Starting the process");
 			DateTime now = DateTime.Now.ToUniversalTime();
 			int oldestDayFromToday = Convert.ToInt32(ConfigurationManager.AppSettings["OldestDayFromToday"]);
 			DateTime oldestDay = now.Date.AddDays((double)(-(double)oldestDayFromToday));
@@ -85,16 +90,10 @@ namespace HistoryExportCmd
 			bool res = dbaccess.GetPoints(out points);
 			if (res)
 			{
-				this.mLogfile.Write(LogFlags.TzINFORMATION, "{0} points read from database", new object[]
-				{
-					points.Count
-				});
+                                this._log.Information("{PointCount} points read from database", points.Count);
 				for (int type = 1; type <= 3; type++)
 				{
-					this.mLogfile.Write(LogFlags.TzINFORMATION, "Working on {0}", new object[]
-					{
-						(type == 1) ? "Fast History" : ((type == 2) ? "Standard History" : "Extended History")
-					});
+                                        this._log.Information("Working on {HistoryType}", (type == 1) ? "Fast History" : ((type == 2) ? "Standard History" : "Extended History"));
 					List<Point> points2 = null;
 					if (type == 1)
 					{
@@ -114,10 +113,7 @@ namespace HistoryExportCmd
 						where p.HistoryExtd && p.HistoryExtdArch
 						select p).ToList<Point>();
 					}
-					this.mLogfile.Write(LogFlags.TzINFORMATION, "{0} points configured for this History type", new object[]
-					{
-						points2.Count
-					});
+                                        this._log.Information("{PointCount} points configured for this History type", points2.Count);
 					if (points2.Count > 0)
 					{
 						int interval = 0;
@@ -146,14 +142,8 @@ namespace HistoryExportCmd
 								{
 									endDatetime = limit;
 								}
-								this.mLogfile.Write(LogFlags.TzINFORMATION, "iniDateTime: {0}", new object[]
-								{
-									iniDatetime
-								});
-								this.mLogfile.Write(LogFlags.TzINFORMATION, "endDateTime: {0}", new object[]
-								{
-									endDatetime
-								});
+                                                                this._log.Information("iniDateTime: {IniDateTime}", iniDatetime);
+                                                                this._log.Information("endDateTime: {EndDateTime}", endDatetime);
 								if (endDatetime - iniDatetime > TimeSpan.FromSeconds((double)interval))
 								{
 									res = dbaccess.Prepare();
@@ -190,7 +180,7 @@ namespace HistoryExportCmd
 					}
 				}
 			}
-			this.mLogfile.Write(LogFlags.TzINFORMATION, "Process finished");
+                        this._log.Information("Process finished");
 		}
 
 		// Token: 0x06000025 RID: 37 RVA: 0x00003F3C File Offset: 0x0000213C
@@ -208,9 +198,9 @@ namespace HistoryExportCmd
 				{
 					pServer = bServer.Substring(0, bServer.Length - 1) + "A";
 				}
-				this.mLogfile.Write(LogFlags.TzINFORMATION, "Starting the process");
-				string cnPHistory = ConfigurationManager.ConnectionStrings["PointsHistory"].ConnectionString;
-				DBSync dbaccess = new DBSync(this.mLogfile, cnPHistory);
+                                this._log.Information("Starting the process");
+                                string cnPHistory = ConfigurationManager.ConnectionStrings["PointsHistory"].ConnectionString;
+                                DBSync dbaccess = new DBSync(this._log, cnPHistory);
 				bool res = dbaccess.SyncPoint(pServer, bServer);
 				int historyType = 1;
 				while (historyType <= 3 && res)
@@ -218,11 +208,11 @@ namespace HistoryExportCmd
 					res = dbaccess.SyncHistoryTable(pServer, bServer, historyType);
 					historyType++;
 				}
-				this.mLogfile.Write(LogFlags.TzINFORMATION, "Process finished");
+                                this._log.Information("Process finished");
 			}
 		}
 
 		// Token: 0x04000018 RID: 24
-		private LogFile mLogfile;
+                private readonly Serilog.ILogger _log;
 	}
 }
